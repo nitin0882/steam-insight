@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+
+# Optimize crawl budget by disallowing search variations
+Disallow: /search?*
+Disallow: /api/
+
+# Allow specific API endpoints for game data
+Allow: /api/games/*/reviews
+Allow: /api/games/featured
+Allow: /api/games/popular
+
+Sitemap: https://steaminsight.vercel.app/sitemap.xml
