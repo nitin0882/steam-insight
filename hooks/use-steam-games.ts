@@ -1,11 +1,12 @@
 "use client"
+import { useCallback, useEffect, useState } from "react"
 import useSWR from "swr"
 
 interface Game {
   id: number
   name: string
   image: string
-  rating: number
+  rating: number | null
   reviewCount: number
   price: string
   tags: string[]
@@ -23,17 +24,23 @@ interface ApiResponse {
 const fetcher = (url: string) => fetch(url).then((res) => res.json())
 
 export function usePopularGames(limit = 20) {
-  const { data, error, isLoading, mutate } = useSWR<ApiResponse>(`/api/games/popular?limit=${limit}`, fetcher, {
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  const { data, error, isLoading } = useSWR<ApiResponse>(`/api/games/popular?limit=${limit}&refresh=${refreshKey}`, fetcher, {
     revalidateOnFocus: false,
     revalidateOnReconnect: false,
     dedupingInterval: 300000, // 5 minutes
   })
 
+  const refetchWithNewGames = useCallback(() => {
+    setRefreshKey(prev => prev + 1)
+  }, [])
+
   return {
     games: data?.data || [],
     isLoading,
     error: error || (data && !data.success ? data.error : null),
-    refetch: mutate,
+    refetch: refetchWithNewGames,
   }
 }
 
@@ -124,6 +131,12 @@ export function useNewReleases(limit = 20) {
 }
 
 export function useGamesByCategory(category: string, limit = 20) {
+  const [allGames, setAllGames] = useState<Game[]>([])
+  const [currentOffset, setCurrentOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(true)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
   const mainCategoryMap: Record<string, string> = {
     popular: 'popular',
     trending: 'trending',
@@ -131,25 +144,91 @@ export function useGamesByCategory(category: string, limit = 20) {
     new: 'new-releases',
   }
 
-  // Determine the API endpoint based on category type
-  const mainEndpoint = mainCategoryMap[category]
-  const apiUrl = mainEndpoint
-    ? `/api/games/${mainEndpoint}?limit=${limit}`
-    : `/api/games/category/${category}?limit=${limit}`
+  // Include offset in the cache key so SWR treats different pages as different cache entries
+  const cacheKey = `games-category-${category}-${limit}-${currentOffset}`
 
-  const { data, error, isLoading, mutate } = useSWR<ApiResponse>(
-    apiUrl,
-    fetcher,
+  const { data, error, isLoading, mutate } = useSWR<ApiResponse & { hasMore?: boolean; total?: number }>(
+    cacheKey,
+    () => {
+      // Custom fetcher that uses current offset
+      const mainEndpoint = mainCategoryMap[category]
+      const apiUrl = mainEndpoint
+        ? `/api/games/${mainEndpoint}?limit=${limit}&offset=${currentOffset}`
+        : `/api/games/category/${category}?limit=${limit}&offset=${currentOffset}`
+
+      return fetch(apiUrl).then((res) => res.json())
+    },
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
       dedupingInterval: 300000, // 5 minutes
+      refreshInterval: 0, // No automatic refresh
+      revalidateOnMount: true, // Always revalidate on mount
+      revalidateIfStale: true, // Revalidate if data is stale
+      fallbackData: { success: true, data: [], count: 0, hasMore: true }, // Provide fallback to prevent undefined
     }
+  )
+
+  // Update accumulated games when new data arrives
+  useEffect(() => {
+    if (data?.data && data.success) {
+      if (currentOffset === 0) {
+        // First load - replace all games
+        setAllGames(data.data)
+        setIsRefreshing(false) // Refresh complete
+      } else {
+        // Loading more - append to existing games
+        setAllGames(prev => [...prev, ...data.data])
+      }
+      setHasMore(data.hasMore ?? false)
+      setIsLoadingMore(false)
+    }
+  }, [data, currentOffset])
+
+  const loadMore = useCallback(() => {
+    if (!isLoading && !isLoadingMore && hasMore) {
+      setIsLoadingMore(true)
+      setCurrentOffset(prev => prev + limit)
+    }
+  }, [isLoading, isLoadingMore, hasMore, limit])
+
+  const resetAndRefetch = useCallback(() => {
+    setIsRefreshing(true)
+    setCurrentOffset(0)
+    setAllGames([])
+    setHasMore(true)
+    setIsLoadingMore(false)
+    mutate()
+  }, [mutate])
+
+  return {
+    games: allGames,
+    isLoading: isLoading && currentOffset === 0, // Only show loading for initial load
+    isLoadingMore,
+    isRefreshing,
+    error: error || (data && !data.success ? data.error : null),
+    hasMore,
+    loadMore,
+    refetch: resetAndRefetch,
+  }
+}
+
+export function useSearchInCategory(category: string, searchQuery: string, limit = 20) {
+  const shouldFetch = category && searchQuery.trim().length > 0
+
+  const { data, error, isLoading, mutate } = useSWR<ApiResponse>(
+    shouldFetch ? `/api/games/category/${category}?search=${encodeURIComponent(searchQuery)}&limit=${limit}` : null,
+    fetcher,
+    {
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      dedupingInterval: 60000, // 1 minute
+    },
   )
 
   return {
     games: data?.data || [],
-    isLoading,
+    isLoading: shouldFetch ? isLoading : false,
     error: error || (data && !data.success ? data.error : null),
     refetch: mutate,
   }

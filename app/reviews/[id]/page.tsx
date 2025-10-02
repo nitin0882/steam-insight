@@ -1,4 +1,4 @@
-import { generateReviewId } from "@/lib/review-id-utils"
+import { generateReviewId, parseReviewId } from "@/lib/review-id-utils"
 import { getGameDetails, getGameReviews, SteamReview } from "@/lib/steam-api"
 import { stripBBCode } from "@/lib/utils"
 import { Metadata } from "next"
@@ -19,18 +19,6 @@ interface ReviewWithId extends SteamReview {
     }
     quality_score: number
     helpfulness_ratio: number
-}
-
-// Parse review ID to extract components
-function parseReviewId(reviewId: string): { hash: string; gameId: number } | null {
-    const match = reviewId.match(/^rv_(\d+)_([a-f0-9]{12})$/)
-    if (!match) {
-        return null
-    }
-    return {
-        gameId: parseInt(match[1], 10),
-        hash: match[2]
-    }
 }
 
 // Algorithm to calculate review quality score (same as in best reviews)
@@ -84,69 +72,98 @@ function calculateReviewQualityScore(review: SteamReview): number {
     return Math.max(0, score)
 }
 
+// Cache for review lookups to avoid duplicate API calls
+const reviewCache = new Map<string, { data: ReviewWithId | null; timestamp: number }>()
+const REVIEW_CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
+
 // Find a specific review by searching through games and matching the ID
 async function findReviewById(reviewId: string): Promise<ReviewWithId | null> {
+    // Check cache first
+    const cached = reviewCache.get(reviewId)
+    if (cached && Date.now() - cached.timestamp < REVIEW_CACHE_DURATION) {
+        return cached.data
+    }
+
     const parsedId = parseReviewId(reviewId)
     if (!parsedId) {
+        reviewCache.set(reviewId, { data: null, timestamp: Date.now() })
         return null
     }
 
     const { gameId } = parsedId
 
     try {
-        console.log(`Fetching review with ID: ${reviewId} from game ${gameId}`)
-
         // First, get the game details
         const game = await getGameDetails(gameId)
 
         if (!game) {
-            console.log(`Game ${gameId} not found`)
+            reviewCache.set(reviewId, { data: null, timestamp: Date.now() })
             return null
         }
 
-        // Get reviews from this specific game
-        const reviewData = await getGameReviews(gameId, "*", "all", "all")
+        // Get reviews from this specific game, fetching multiple pages if needed
+        let allReviews: SteamReview[] = []
+        let cursor = "*"
+        const maxPages = 10 // Allow more pages since we're fetching 100 per page
 
-        if (reviewData.reviews && reviewData.reviews.length > 0) {
-            // Filter out fallback reviews
-            const realReviews = reviewData.reviews.filter(review =>
-                !review.recommendationid.includes('fallback')
-            )
+        for (let page = 0; page < maxPages; page++) {
+            const reviewData = await getGameReviews(gameId, cursor, "all", "all")
 
-            // Check each review to see if it matches our ID
-            for (const review of realReviews) {
-                const generatedId = generateReviewId(review, gameId)
+            if (reviewData.reviews && reviewData.reviews.length > 0) {
+                // Filter out fallback reviews
+                const realReviews = reviewData.reviews.filter(review =>
+                    !review.recommendationid.includes('fallback')
+                )
+                allReviews = allReviews.concat(realReviews)
 
-                if (generatedId === reviewId) {
-                    console.log(`Found matching review in ${game.name}`)
+                // Check each review to see if it matches our ID
+                for (const review of realReviews) {
+                    const generatedId = generateReviewId(review, gameId)
 
-                    // Calculate quality metrics
-                    const qualityScore = calculateReviewQualityScore(review)
-                    const helpfulnessRatio = review.votes_up > 0
-                        ? review.votes_up / (review.votes_up + (review.votes_funny || 0))
-                        : 0
+                    if (generatedId === reviewId) {
+                        // Calculate quality metrics
+                        const qualityScore = calculateReviewQualityScore(review)
+                        const helpfulnessRatio = review.votes_up > 0
+                            ? review.votes_up / (review.votes_up + (review.votes_funny || 0))
+                            : 0
 
-                    return {
-                        ...review,
-                        unique_id: reviewId,
-                        game: {
-                            appid: game.appid,
-                            name: game.name,
-                            header_image: game.header_image || "",
-                            genres: game.genres || []
-                        },
-                        quality_score: qualityScore,
-                        helpfulness_ratio: helpfulnessRatio
+                        const result = {
+                            ...review,
+                            unique_id: reviewId,
+                            game: {
+                                appid: game.appid,
+                                name: game.name,
+                                header_image: game.header_image || "",
+                                genres: game.genres || []
+                            },
+                            quality_score: qualityScore,
+                            helpfulness_ratio: helpfulnessRatio
+                        }
+
+                        reviewCache.set(reviewId, { data: result, timestamp: Date.now() })
+                        return result
                     }
                 }
+
+                // Check if we have a next cursor
+                if (reviewData.cursor && reviewData.cursor !== cursor && reviewData.cursor !== "") {
+                    cursor = reviewData.cursor
+                } else {
+                    // No more pages
+                    break
+                }
+            } else {
+                // No reviews in this batch
+                break
             }
         }
 
-        console.log(`Review ${reviewId} not found in game ${gameId}`)
+        reviewCache.set(reviewId, { data: null, timestamp: Date.now() })
         return null
 
     } catch (error) {
         console.error("Error finding review by ID:", error)
+        reviewCache.set(reviewId, { data: null, timestamp: Date.now() })
         return null
     }
 }

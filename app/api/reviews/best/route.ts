@@ -99,11 +99,9 @@ function calculateReviewQualityScore(review: SteamReview): number {
 // Get diverse, high-quality reviews from popular games
 async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
     try {
-        console.log(`Fetching best reviews with limit: ${limit}`)
 
         // Get popular games to source reviews from
         const games = await getPopularGames(30) // Get more games for better review diversity
-        console.log(`Got ${games.length} popular games for review sourcing`)
 
         if (games.length === 0) {
             console.warn("No games available for reviews")
@@ -118,7 +116,6 @@ async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
             const game = games[i]
 
             try {
-                console.log(`Fetching reviews for game: ${game.name} (${game.appid})`)
 
                 // Try different configurations to get real reviews
                 let reviewData
@@ -133,7 +130,6 @@ async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
 
                 // If no reviews, try just positive reviews
                 if (!reviewData.reviews || reviewData.reviews.length === 0) {
-                    console.log(`No reviews found for ${game.name}, trying positive reviews only`)
                     reviewData = await getGameReviews(
                         game.appid,
                         "*",
@@ -147,8 +143,6 @@ async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
                     const realReviews = reviewData.reviews.filter(review =>
                         !review.recommendationid.includes('fallback')
                     )
-
-                    console.log(`Found ${realReviews.length} real reviews out of ${reviewData.reviews.length} total for ${game.name}`)
 
                     if (realReviews.length > 0) {
                         // Process and score reviews using real reviews only
@@ -183,10 +177,7 @@ async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
                             .slice(0, maxReviewsPerGame)
 
                         allReviews.push(...scoredReviews)
-                        console.log(`Added ${scoredReviews.length} quality reviews from ${game.name}`)
                     }
-                } else {
-                    console.log(`No reviews found for ${game.name}`)
                 }
 
                 // Small delay to be respectful to API
@@ -230,7 +221,6 @@ async function getBestReviews(limit: number = 20): Promise<BestReview[]> {
             if (finalReviews.length >= limit) break
         }
 
-        console.log(`Returning ${finalReviews.length} best reviews from ${gamesSeen.size} games`)
         return finalReviews.slice(0, limit)
 
     } catch (error) {
@@ -243,8 +233,6 @@ export async function GET(request: NextRequest) {
     try {
         const { searchParams } = request.nextUrl
         const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 50) // Cap at 50
-
-        console.log(`Best reviews API called with limit: ${limit}`)
 
         const reviews = await getBestReviews(limit)
 

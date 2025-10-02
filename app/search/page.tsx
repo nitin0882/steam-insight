@@ -1,3 +1,4 @@
+import { MotionEffect } from "@/components/animate-ui/effects/motion-effect"
 import { SearchSection } from "@/components/search-section"
 import { Metadata } from "next"
 import { Suspense } from "react"
@@ -26,12 +27,31 @@ export default function SearchPage({ searchParams }: SearchPageProps) {
         <main className="min-h-screen bg-background">
             <div className="container mx-auto px-4 py-8">
                 <div className="mb-8">
-                    <h1 className="text-3xl font-bold text-foreground mb-2">
-                        {query ? `Search Results for "${query}"` : "Search Games"}
-                    </h1>
-                    <p className="text-muted-foreground">
-                        {query ? `Find games matching your search` : "Discover your next favorite game"}
-                    </p>
+                    <MotionEffect
+                        slide={{
+                            direction: 'up',
+                        }}
+                        fade
+                        zoom
+                        inView
+                    >
+                        <h1 className="text-3xl font-bold text-foreground mb-2">
+                            {query ? `Search Results for "${query}"` : "Search Games"}
+                        </h1>
+                    </MotionEffect>
+                    <MotionEffect
+                        slide={{
+                            direction: 'up',
+                        }}
+                        fade
+                        zoom
+                        inView
+                        delay={0.1}
+                    >
+                        <p className="text-muted-foreground">
+                            {query ? `Find games matching your search` : "Discover your next favorite game"}
+                        </p>
+                    </MotionEffect>
                 </div>
 
                 <Suspense fallback={<div>Loading search results...</div>}>

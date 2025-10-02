@@ -94,14 +94,12 @@ async function findReviewById(reviewId: string): Promise<ReviewWithId | null> {
     const { gameId } = parsedId
 
     try {
-        console.log(`Fetching review with ID: ${reviewId} from game ${gameId}`)
 
         // First, get the game details
         const { getGameDetails } = await import("@/lib/steam-api")
         const game = await getGameDetails(gameId)
 
         if (!game) {
-            console.log(`Game ${gameId} not found`)
             return null
         }
 
@@ -119,7 +117,6 @@ async function findReviewById(reviewId: string): Promise<ReviewWithId | null> {
                 const generatedId = generateReviewId(review, gameId)
 
                 if (generatedId === reviewId) {
-                    console.log(`Found matching review in ${game.name}`)
 
                     // Calculate quality metrics
                     const qualityScore = calculateReviewQualityScore(review)
@@ -143,7 +140,6 @@ async function findReviewById(reviewId: string): Promise<ReviewWithId | null> {
             }
         }
 
-        console.log(`Review ${reviewId} not found in game ${gameId}`)
         return null
 
     } catch (error) {
@@ -166,8 +162,6 @@ export async function GET(
                 { status: 400 }
             )
         }
-
-        console.log(`Fetching review with ID: ${reviewId}`)
 
         const review = await findReviewById(reviewId)
 

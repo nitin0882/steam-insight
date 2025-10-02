@@ -76,8 +76,6 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       return NextResponse.json({ success: false, error: "Invalid game ID" }, { status: 400 })
     }
 
-    console.log(`Fetching reviews for game ${appId} with cursor: ${cursor}, limit: ${limit}, sort: ${sortBy}`)
-
     // Get game details first to verify the game exists
     const gameDetails = await getGameDetails(appId)
     if (!gameDetails) {

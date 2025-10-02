@@ -8,12 +8,9 @@ export async function GET(request: NextRequest) {
     const limit = Number.parseInt(searchParams.get("limit") || "20")
 
     try {
-        console.log(`Fetching top-rated games with limit: ${limit}`)
 
         const games = await getTopRatedGames(limit)
         const formattedGames = games.map(formatGameForDisplay)
-
-        console.log(`Successfully fetched ${formattedGames.length} top-rated games`)
 
         return NextResponse.json({
             success: true,
@@ -41,8 +38,6 @@ export async function GET(request: NextRequest) {
                 developers: ["Top Developer"],
                 publishers: ["Top Publisher"]
             }))
-
-            console.log(`Returning ${fallbackGames.length} fallback top-rated games`)
 
             return NextResponse.json({
                 success: true,

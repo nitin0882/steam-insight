@@ -1,11 +1,7 @@
-import { GameDetails } from "@/components/game-details"
-import { GameReviews } from "@/components/game-reviews"
-import { RelatedGames } from "@/components/related-games"
-import { Skeleton } from "@/components/ui/skeleton"
 import { getGameDetails } from "@/lib/steam-api"
 import { Metadata } from "next"
 import { notFound } from "next/navigation"
-import { Suspense } from "react"
+import GamePageClient from "./GamePageClient"
 
 interface GamePageProps {
   params: {
@@ -90,66 +86,5 @@ export default async function GamePage({ params }: GamePageProps) {
     notFound()
   }
 
-  // We'll let the individual components handle their own data fetching
-  // This allows for better loading states and error handling
-  return (
-    <main className="min-h-screen bg-background">
-      <Suspense fallback={<GameDetailsSkeleton />}>
-        <GameDetails gameId={gameId} />
-      </Suspense>
-
-      <Suspense fallback={<GameReviewsSkeleton />}>
-        <GameReviews gameId={gameId} />
-      </Suspense>
-
-      <Suspense fallback={<RelatedGamesSkeleton />}>
-        <RelatedGames gameId={gameId} />
-      </Suspense>
-    </main>
-  )
-}
-
-function GameDetailsSkeleton() {
-  return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2">
-          <Skeleton className="h-8 w-3/4 mb-4" />
-          <Skeleton className="h-4 w-full mb-2" />
-          <Skeleton className="h-4 w-2/3 mb-6" />
-          <Skeleton className="h-64 w-full mb-6" />
-        </div>
-        <div>
-          <Skeleton className="h-48 w-full mb-4" />
-          <Skeleton className="h-32 w-full" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function GameReviewsSkeleton() {
-  return (
-    <div className="container mx-auto px-4 py-8">
-      <Skeleton className="h-8 w-48 mb-6" />
-      <div className="space-y-4">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Skeleton key={i} className="h-32 w-full" />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function RelatedGamesSkeleton() {
-  return (
-    <div className="container mx-auto px-4 py-8">
-      <Skeleton className="h-8 w-48 mb-6" />
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-64 w-full" />
-        ))}
-      </div>
-    </div>
-  )
+  return <GamePageClient gameId={gameId} />
 }

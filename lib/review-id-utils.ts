@@ -81,7 +81,8 @@ export function shortenReviewId(reviewId: string, length: number = 10): string {
     const parsed = parseReviewId(reviewId)
     if (!parsed) return reviewId
 
-    return `${parsed.prefix}${parsed.hash.substring(0, Math.max(1, length - 3))}...`
+    const shortHash = parsed.hash.length > length ? parsed.hash.substring(0, length) + "..." : parsed.hash
+    return `${parsed.prefix}${parsed.gameId}_${shortHash}`
 }
 
 /**

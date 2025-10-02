@@ -20,8 +20,6 @@ export function useBestReviews(limit: number = 20): UseBestReviewsReturn {
             setIsLoading(true)
             setError(null)
 
-            console.log(`Fetching best reviews with limit: ${limit}`)
-
             const response = await fetch(`/api/reviews/best?limit=${limit}`, {
                 method: "GET",
                 headers: {
@@ -39,7 +37,6 @@ export function useBestReviews(limit: number = 20): UseBestReviewsReturn {
             if (data.reviews && Array.isArray(data.reviews)) {
                 setReviews(data.reviews)
                 setTotal(data.total || data.reviews.length)
-                console.log(`Successfully fetched ${data.reviews.length} reviews`)
             } else {
                 throw new Error("Invalid response format")
             }

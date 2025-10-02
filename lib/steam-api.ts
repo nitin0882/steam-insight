@@ -4,15 +4,12 @@
 // Check for Steam API key
 const steamApiKey = process.env.STEAM_API_KEY || false
 
-console.log('Initializing Steam API with direct approach...')
-console.log('Steam API Key present:', !!steamApiKey)
-console.log('Steam API Key length:', steamApiKey ? steamApiKey.length : 0)
-
 // Enhanced types for Steam API responses
 export interface SteamGame {
   appid: number
   steam_appid?: number  // Alternative ID field from Steam API
   name: string
+  type?: string  // "game", "hardware", "tool", etc.
   short_description?: string
   header_image?: string
   screenshots?: Array<{
@@ -168,7 +165,197 @@ export interface SteamAppList {
 
 // Cache for API responses
 const cache = new Map<string, { data: unknown; timestamp: number }>()
-const CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
+const CACHE_DURATION = 10 * 60 * 1000 // 10 minutes (increased cache duration)
+
+// Rate limiting for Steam API
+class RateLimiter {
+  private requestQueue: Array<() => Promise<void>> = []
+  private processing = false
+  private lastRequestTime = 0
+  private readonly minDelay = 1000
+  private readonly burstDelay = 150
+  private requestCount = 0
+  private readonly maxBurstRequests = 5
+
+  async addRequest<T>(requestFn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.requestQueue.push(async () => {
+        try {
+          const result = await requestFn()
+          resolve(result)
+        } catch (error) {
+          reject(error)
+        }
+      })
+      this.processQueue()
+    })
+  }
+
+  private async processQueue() {
+    if (this.processing || this.requestQueue.length === 0) return
+
+    this.processing = true
+
+    while (this.requestQueue.length > 0) {
+      const request = this.requestQueue.shift()!
+
+      // Calculate delay based on burst requests and time since last request
+      const now = Date.now()
+      const timeSinceLastRequest = now - this.lastRequestTime
+
+      let delay = 0
+      if (this.requestCount >= this.maxBurstRequests) {
+        // After burst limit, use longer delay
+        delay = Math.max(0, this.minDelay - timeSinceLastRequest)
+        this.requestCount = 0
+      } else {
+        // Within burst limit, use shorter delay
+        delay = Math.max(0, this.burstDelay - timeSinceLastRequest)
+        this.requestCount++
+      }
+
+      if (delay > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+
+      this.lastRequestTime = Date.now()
+      await request()
+    }
+
+    this.processing = false
+  }
+}
+
+// Circuit breaker to prevent repeated failures
+class CircuitBreaker {
+  private failures = 0
+  private lastFailureTime = 0
+  private rateLimit429Count = 0
+  private readonly maxFailures = 3 // Reduced from 5 to 3
+  private readonly max429Errors = 2 // Allow only 2 rate limit errors before opening
+  private readonly resetTimeout = 90000 // Increased from 60000 to 90000 (1.5 minutes)
+
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.isOpen()) {
+      throw new Error('Circuit breaker is open - too many recent failures or rate limits')
+    }
+
+    try {
+      const result = await operation()
+      this.onSuccess()
+      return result
+    } catch (error) {
+      // Check if it's a rate limit error
+      if (error instanceof Error && error.message.includes('Rate limited')) {
+        this.onRateLimit()
+      } else {
+        this.onFailure()
+      }
+      throw error
+    }
+  }
+
+  private isOpen(): boolean {
+    const now = Date.now()
+    const timeSinceLastFailure = now - this.lastFailureTime
+
+    // Open circuit if too many rate limit errors
+    if (this.rateLimit429Count >= this.max429Errors && timeSinceLastFailure < this.resetTimeout) {
+      return true
+    }
+
+    // Open circuit if too many general failures
+    if (this.failures >= this.maxFailures && timeSinceLastFailure < this.resetTimeout) {
+      return true
+    }
+
+    // Reset if timeout has passed
+    if (timeSinceLastFailure >= this.resetTimeout) {
+      this.failures = 0
+      this.rateLimit429Count = 0
+    }
+
+    return false
+  }
+
+  private onSuccess(): void {
+    this.failures = 0
+    this.rateLimit429Count = 0
+  }
+
+  private onFailure(): void {
+    this.failures++
+    this.lastFailureTime = Date.now()
+  }
+
+  private onRateLimit(): void {
+    this.rateLimit429Count++
+    this.failures++ // Rate limits also count as general failures
+    this.lastFailureTime = Date.now()
+  }
+}
+
+const steamRateLimiter = new RateLimiter()
+const steamCircuitBreaker = new CircuitBreaker()
+
+// API monitoring
+class APIMonitor {
+  private stats = {
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    cacheHits: 0,
+    rateLimitErrors: 0,
+    forbiddenErrors: 0,
+    lastResetTime: Date.now()
+  }
+
+  logRequest(success: boolean, fromCache: boolean = false, errorType?: string): void {
+    this.stats.totalRequests++
+
+    if (fromCache) {
+      this.stats.cacheHits++
+      return
+    }
+
+    if (success) {
+      this.stats.successfulRequests++
+    } else {
+      this.stats.failedRequests++
+      if (errorType === 'rate_limit') this.stats.rateLimitErrors++
+      if (errorType === 'forbidden') this.stats.forbiddenErrors++
+    }
+  }
+
+  getStats(): typeof this.stats & { successRate: number; cacheHitRate: number } {
+    const successRate = this.stats.totalRequests > 0
+      ? (this.stats.successfulRequests + this.stats.cacheHits) / this.stats.totalRequests
+      : 0
+    const cacheHitRate = this.stats.totalRequests > 0
+      ? this.stats.cacheHits / this.stats.totalRequests
+      : 0
+
+    return {
+      ...this.stats,
+      successRate: Math.round(successRate * 100) / 100,
+      cacheHitRate: Math.round(cacheHitRate * 100) / 100
+    }
+  }
+
+  reset(): void {
+    this.stats = {
+      totalRequests: 0,
+      successfulRequests: 0,
+      failedRequests: 0,
+      cacheHits: 0,
+      rateLimitErrors: 0,
+      forbiddenErrors: 0,
+      lastResetTime: Date.now()
+    }
+  }
+}
+
+const apiMonitor = new APIMonitor()
 
 function getCachedData<T>(key: string): T | null {
   const cached = cache.get(key)
@@ -182,87 +369,172 @@ function setCachedData(key: string, data: unknown): void {
   cache.set(key, { data, timestamp: Date.now() })
 }
 
-// Direct Steam store API call for game details
+// Direct Steam store API call for game details with rate limiting and error handling
 async function getGameDetailsDirectAPI(appId: number): Promise<SteamGame | null> {
+  const cacheKey = `game-details-${appId}`
+  const cached = getCachedData<SteamGame>(cacheKey)
+  if (cached) {
+    apiMonitor.logRequest(true, true)
+    return cached
+  }
+
   try {
-    console.log(`Making direct API call for game ${appId}`)
+    return await steamCircuitBreaker.execute(() =>
+      steamRateLimiter.addRequest(async () => {
 
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 10000) // Reduced timeout
 
-    const response = await fetch(`https://store.steampowered.com/api/appdetails?appids=${appId}&cc=us&l=english`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      signal: controller.signal
-    })
+        const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=us&l=english`
 
-    clearTimeout(timeoutId)
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+          },
+          signal: controller.signal
+        })
 
-    if (!response.ok) {
-      console.warn(`Direct Steam API returned ${response.status} for app ${appId}`)
-      return null
-    }
+        clearTimeout(timeoutId)
 
-    const data = await response.json()
-    const gameInfo = data[appId]
+        // Handle different error codes appropriately
+        if (response.status === 429) {
+          apiMonitor.logRequest(false, false, 'rate_limit')
+          // Exponential backoff with jitter for rate limiting
+          const backoffDelay = 3000 + Math.random() * 2000 // 3-5 seconds
+          await new Promise(resolve => setTimeout(resolve, backoffDelay))
+          throw new Error(`Rate limited: ${response.status}`)
+        }
 
-    if (!gameInfo || !gameInfo.success || !gameInfo.data) {
-      console.warn(`Steam API returned no data for app ${appId}`)
-      return null
-    }
+        if (response.status === 403) {
+          apiMonitor.logRequest(false, false, 'forbidden')
+          return null // Don't retry for 403 errors
+        }
 
-    const gameData = gameInfo.data
-    console.log(`Direct API successfully fetched data for game ${appId}: ${gameData.name}`)
+        if (!response.ok) {
+          apiMonitor.logRequest(false, false, 'http_error')
+          throw new Error(`Steam API error: ${response.status}`)
+        }
 
-    return {
-      appid: appId,
-      steam_appid: appId,
-      name: gameData.name || "Unknown Game",
-      short_description: gameData.short_description || "",
-      header_image: gameData.header_image || "",
-      screenshots: gameData.screenshots || [],
-      movies: gameData.movies || [],
-      price_overview: gameData.price_overview ? {
-        currency: gameData.price_overview.currency,
-        initial: gameData.price_overview.initial,
-        final: gameData.price_overview.final,
-        discount_percent: gameData.price_overview.discount_percent,
-        initial_formatted: gameData.price_overview.initial_formatted,
-        final_formatted: gameData.price_overview.final_formatted,
-      } : undefined,
-      is_free: gameData.is_free || false,
-      genres: gameData.genres || [],
-      categories: gameData.categories || [],
-      release_date: gameData.release_date || { coming_soon: false, date: "" },
-      metacritic: gameData.metacritic || undefined,
-      recommendations: gameData.recommendations || undefined,
-      developers: gameData.developers || [],
-      publishers: gameData.publishers || []
-    }
+        const data = await response.json()
+        const gameInfo = data[appId]
+
+        if (!gameInfo) {
+          apiMonitor.logRequest(false, false, 'no_data')
+          return null
+        }
+
+        if (!gameInfo.success) {
+          apiMonitor.logRequest(false, false, 'api_error')
+          return null
+        }
+
+        if (!gameInfo.data) {
+          apiMonitor.logRequest(false, false, 'no_game_data')
+          return null
+        }
+
+        const gameData = gameInfo.data
+        const result = {
+          appid: appId,
+          steam_appid: appId,
+          name: gameData.name || "Unknown Game",
+          type: gameData.type || "game",  // Include the app type
+          short_description: gameData.short_description || "",
+          header_image: gameData.header_image || "",
+          screenshots: gameData.screenshots || [],
+          movies: gameData.movies || [],
+          price_overview: gameData.price_overview ? {
+            currency: gameData.price_overview.currency,
+            initial: gameData.price_overview.initial,
+            final: gameData.price_overview.final,
+            discount_percent: gameData.price_overview.discount_percent,
+            initial_formatted: gameData.price_overview.initial_formatted,
+            final_formatted: gameData.price_overview.final_formatted,
+          } : undefined,
+          is_free: gameData.is_free || false,
+          genres: gameData.genres || [],
+          categories: gameData.categories || [],
+          release_date: gameData.release_date || { coming_soon: false, date: "" },
+          metacritic: gameData.metacritic || undefined,
+          recommendations: gameData.recommendations || undefined,
+          developers: gameData.developers || [],
+          publishers: gameData.publishers || []
+        }
+
+        // Cache successful results
+        setCachedData(cacheKey, result)
+        apiMonitor.logRequest(true, false)
+        return result
+      })
+    )
   } catch (error) {
+    if (error instanceof Error && error.message.includes('Circuit breaker is open')) {
+      apiMonitor.logRequest(false, false, 'circuit_breaker')
+      return null
+    }
+
     if (error instanceof Error && error.name === 'AbortError') {
-      console.error(`Direct API timeout for game ${appId}`)
+      apiMonitor.logRequest(false, false, 'timeout')
     } else {
-      console.error(`Direct API error for game ${appId}:`, error)
+      apiMonitor.logRequest(false, false, 'unknown_error')
     }
     return null
   }
 }
 
+// Export API stats for monitoring
+export function getAPIStats() {
+  return apiMonitor.getStats()
+}
+
 // Get featured games using direct API approach
-async function getFeaturedGamesDirectAPI(): Promise<number[]> {
+export async function getFeaturedGamesDirectAPI(): Promise<number[]> {
   try {
-    // Fallback to known popular game IDs
-    return [
-      730, 440, 570, 1091500, 292030, 1174180, 1245620, 271590, 1085660, 892970,
-      1203220, 1938090, 1172470, 945360, 1086940, 381210, 252490, 1517290, 578080, 322330
-    ]
-  } catch (error) {
-    console.error('Error in getFeaturedGamesDirectAPI:', error)
-    // Fallback to known popular game IDs
+    // Use Steam's store front API to get featured games
+    const response = await fetch('https://store.steampowered.com/api/featured/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      }
+    })
+
+    if (!response.ok) {
+      throw new Error(`Steam API returned ${response.status}`)
+    }
+
+    const data = await response.json()
+
+    // Extract app IDs from featured games
+    const appIds: number[] = []
+
+    // Get featured_win (main featured games)
+    if (data.featured_win) {
+      appIds.push(...data.featured_win.map((game: { id: number }) => game.id))
+    }
+
+    // Get top sellers
+    if (data.top_sellers) {
+      appIds.push(...data.top_sellers.map((game: { id: number }) => game.id))
+    }
+
+    // Get new releases
+    if (data.new_releases) {
+      appIds.push(...data.new_releases.map((game: { id: number }) => game.id))
+    }
+
+    // Remove duplicates and return
+    const uniqueAppIds = [...new Set(appIds)]
+
+    if (uniqueAppIds.length === 0) {
+      throw new Error('No featured games returned from Steam API')
+    }
+
+    return uniqueAppIds
+  } catch {
+    // Fallback to known popular game IDs only when Steam API fails
     return [
       730, 440, 570, 1091500, 292030, 1174180, 1245620, 271590, 1085660, 892970,
       1203220, 1938090, 1172470, 945360, 1086940, 381210, 252490, 1517290, 578080, 322330
@@ -328,8 +600,7 @@ export async function getUserSummaries(steamIds: string[]): Promise<Map<string, 
             })
           })
         }
-      } catch (error) {
-        console.warn(`Failed to fetch user summaries:`, error)
+      } catch {
       }
 
       // Small delay between batches
@@ -337,8 +608,7 @@ export async function getUserSummaries(steamIds: string[]): Promise<Map<string, 
         await new Promise(resolve => setTimeout(resolve, 100))
       }
     }
-  } catch (error) {
-    console.error('Error fetching user summaries:', error)
+  } catch {
   }
 
   return userMap
@@ -350,64 +620,56 @@ export async function getPopularGames(count = 20): Promise<SteamGame[]> {
   if (cached) return cached
 
   try {
-    console.log(`Fetching popular games with count: ${count}`)
+    // Use Steam's featured categories API to get top sellers (most popular)
+    const featuredResponse = await fetch('https://store.steampowered.com/api/featuredcategories/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      }
+    })
 
-    // Get featured games using direct API approach
-    console.log("Getting featured games from SteamSpy...")
-    const appIds = await getFeaturedGamesDirectAPI()
-    console.log(`Got ${appIds.length} app IDs from featured games`)
-
-    // Remove duplicates and limit count
-    const uniqueAppIds = [...new Set(appIds)].slice(0, count)
-
-    if (uniqueAppIds.length === 0) {
-      console.warn("No featured games available from API, using fallback")
-      return getFallbackPopularGames(count)
+    if (!featuredResponse.ok) {
+      throw new Error(`Steam featured API failed: ${featuredResponse.status}`)
     }
 
-    // Get detailed info for each game with error handling
+    const featuredData = await featuredResponse.json()
+
+    // Get top sellers as our "popular" games
+    const topSellers = featuredData.top_sellers?.items || []
+    if (topSellers.length === 0) {
+      throw new Error('No top sellers found in Steam API response')
+    }
+
+    // Remove duplicates by ID
+    const uniqueTopSellers = topSellers.filter((item: { id: number; name?: string }, index: number, arr: { id: number; name?: string }[]) =>
+      arr.findIndex((i: { id: number; name?: string }) => i.id === item.id) === index
+    )
+
+    // Convert Steam store items to our format and get detailed info
     const games: SteamGame[] = []
-    const maxConcurrent = 5 // Limit concurrent requests to avoid rate limiting
+    const itemsToProcess = uniqueTopSellers.slice(0, Math.min(count * 1.5, 30)) // Reduced candidates
 
-    for (let i = 0; i < uniqueAppIds.length; i += maxConcurrent) {
-      const batch = uniqueAppIds.slice(i, i + maxConcurrent)
-      console.log(`Processing batch ${Math.floor(i / maxConcurrent) + 1}: ${batch.length} games`)
+    // Process games sequentially to avoid overwhelming the API
+    for (let i = 0; i < itemsToProcess.length && games.length < count; i++) {
+      const item = itemsToProcess[i]
 
-      const promises = batch.map(async (appId: number) => {
-        try {
-          const gameData = await getGameDetailsDirectAPI(appId)
-          return gameData
-        } catch (error) {
-          console.error(`Failed to fetch details for game ${appId}:`, error)
-          return null
+      try {
+        const gameData = await getGameDetailsDirectAPI(item.id)
+
+        if (gameData) {
+          games.push(gameData)
         }
-      })
-
-      const results = await Promise.allSettled(promises)
-      results.forEach((result) => {
-        if (result.status === 'fulfilled' && result.value) {
-          games.push(result.value)
-        }
-      })
-
-      // Add small delay between batches to be respectful to Steam API
-      if (i + maxConcurrent < uniqueAppIds.length) {
-        await new Promise(resolve => setTimeout(resolve, 200))
+      } catch {
       }
     }
 
-    console.log(`Successfully fetched ${games.length} game details`)
-
     if (games.length === 0) {
-      console.warn("Failed to fetch any game details from Steam API, using fallback")
       return getFallbackPopularGames(count)
     }
 
     setCachedData(cacheKey, games)
     return games
-  } catch (error) {
-    console.error("Error fetching popular games:", error)
-    console.error("Error stack:", error)
+  } catch {
     return getFallbackPopularGames(count)
   }
 }
@@ -419,19 +681,15 @@ export async function getGameDetails(appId: number): Promise<SteamGame | null> {
   if (cached) return cached
 
   try {
-    console.log(`Fetching game details for ${appId} using direct API`)
     const gameData = await getGameDetailsDirectAPI(appId)
 
     if (!gameData) {
-      console.log(`No game data found for ${appId}`)
       return null
     }
 
-    console.log(`Successfully fetched game details for ${appId}: ${gameData.name}`)
     setCachedData(cacheKey, gameData)
     return gameData
-  } catch (error) {
-    console.error(`Error fetching game details for ${appId}:`, error)
+  } catch {
     return null
   }
 }
@@ -556,13 +814,12 @@ export async function searchGames(query: string, limit = 20): Promise<SteamGame[
 
   try {
     const searchQuery = query.toLowerCase().trim()
-    console.log(`Enhanced search for: "${query}"`)
 
     // Strategy 1: Search through Steam App list for exact/partial matches
     let steamAppMatches: { appid: number; name: string; score: number }[] = []
 
     try {
-      const response = await fetch('https://api.steampowered.com/ISteamApps/GetAppList/v2/')
+      const response = await fetch('https://api.steampowered.com/ISteamApps/GetAppList/v2/', { cache: 'no-store' })
       const appListData = await response.json() as SteamAppList
 
       if (appListData?.applist?.apps) {
@@ -575,8 +832,7 @@ export async function searchGames(query: string, limit = 20): Promise<SteamGame[
           .sort((a, b) => b.score - a.score)
           .slice(0, Math.min(limit * 2, 40)) // Get more candidates
       }
-    } catch (error) {
-      console.warn('Failed to fetch Steam app list:', error)
+    } catch {
     }
 
     // Strategy 2: Also search through our popular/trending games for immediate results
@@ -612,43 +868,33 @@ export async function searchGames(query: string, limit = 20): Promise<SteamGame[
       detailedGames.push({ ...match.game, searchScore: match.score })
     }
 
-    // Get detailed info for Steam app matches
+    // Get detailed info for Steam app matches with rate limiting
     if (steamAppMatches.length > 0) {
-      const maxConcurrent = 6
-      for (let i = 0; i < steamAppMatches.length && detailedGames.length < limit * 1.5; i += maxConcurrent) {
-        const batch = steamAppMatches.slice(i, i + maxConcurrent)
-        const promises = batch.map(async (app) => {
-          try {
-            // Skip if we already have this game from local matches
-            if (detailedGames.find(g => g.appid === app.appid)) {
-              return null
-            }
+      for (let i = 0; i < steamAppMatches.length && detailedGames.length < limit * 1.5; i++) {
+        const app = steamAppMatches[i]
 
-            const gameDetails = await getGameDetailsDirectAPI(app.appid)
-            if (gameDetails && gameDetails.name && gameDetails.name.trim() !== '') {
-              // Recalculate score with full game data
-              const fullScore = calculateSearchScore(
-                gameDetails.name,
-                searchQuery,
-                gameDetails.short_description || '',
-                gameDetails.genres?.map(g => g.description) || [],
-                gameDetails.categories?.map(c => c.description) || []
-              )
-              return { ...gameDetails, searchScore: fullScore }
-            }
-            return null
-          } catch (error) {
-            console.warn(`Failed to get details for app ${app.appid}:`, error)
-            return null
+        try {
+          // Skip if we already have this game from local matches
+          if (detailedGames.find(g => g.appid === app.appid)) {
+            continue
           }
-        })
 
-        const results = await Promise.all(promises)
-        const validResults = results.filter((game): game is SteamGame & { searchScore: number } =>
-          game !== null && game.searchScore > 50
-        )
-
-        detailedGames.push(...validResults)
+          const gameDetails = await getGameDetailsDirectAPI(app.appid)
+          if (gameDetails && gameDetails.name && gameDetails.name.trim() !== '') {
+            // Recalculate score with full game data
+            const fullScore = calculateSearchScore(
+              gameDetails.name,
+              searchQuery,
+              gameDetails.short_description || '',
+              gameDetails.genres?.map(g => g.description) || [],
+              gameDetails.categories?.map(c => c.description) || []
+            )
+            if (fullScore > 50) {
+              detailedGames.push({ ...gameDetails, searchScore: fullScore })
+            }
+          }
+        } catch {
+        }
       }
     }
 
@@ -663,16 +909,13 @@ export async function searchGames(query: string, limit = 20): Promise<SteamGame[
         return gameWithoutScore
       })
 
-    console.log(`Enhanced search returned ${uniqueGames.length} games for "${query}"`)
-
     if (uniqueGames.length > 0) {
       setCachedData(cacheKey, uniqueGames)
     }
 
     return uniqueGames
 
-  } catch (error) {
-    console.error("Error in enhanced searchGames:", error)
+  } catch {
     // Fallback to simple search in popular games
     try {
       const popularGames = await getPopularGames(50)
@@ -681,149 +924,15 @@ export async function searchGames(query: string, limit = 20): Promise<SteamGame[
         game.name.toLowerCase().includes(searchTerm)
       ).slice(0, limit)
       return matches
-    } catch (fallbackError) {
-      console.error("Fallback search also failed:", fallbackError)
+    } catch {
       return []
     }
   }
 }
 
-// Fallback search results when Steam API is not accessible
-function getFallbackSearchResults(query: string, limit: number): SteamGame[] {
-  const searchTerm = query.toLowerCase()
 
-  // Common game mappings for popular searches
-  const gameSearchMappings: { [key: string]: number[] } = {
-    'skyrim': [489830, 72850], // Skyrim Special Edition, Original Skyrim
-    'elder scrolls': [489830, 72850, 306130], // Skyrim games + ESO
-    'witcher': [292030, 20920, 1207664], // Witcher 3, Witcher 2, Witcher 1
-    'cyberpunk': [1091500], // Cyberpunk 2077
-    'gta': [271590, 12220], // GTA V, GTA IV
-    'grand theft auto': [271590, 12220],
-    'cs': [730], // Counter-Strike 2
-    'counter strike': [730],
-    'dota': [570], // Dota 2
-    'pubg': [578080], // PUBG
-    'rust': [252490], // Rust
-    'minecraft': [1091500], // Close approximation
-    'fallout': [377160, 22370, 22300], // Fallout 4, New Vegas, 3
-    'doom': [379720, 2280], // Doom 2016, Original
-    'half life': [546560, 220, 380], // Alyx, HL2, HL1
-    'portal': [620, 400], // Portal 2, Portal 1
-    'bioshock': [8870, 409710, 7670], // Bioshock series
-    'mass effect': [1328670, 17460], // Mass Effect games
-    'assassin': [812140, 48190], // Assassin's Creed games
-    'call of duty': [1938090, 10190], // COD games
-    'battlefield': [1517290, 24960], // Battlefield games
-  }
 
-  // Find matching games based on search mappings
-  const matchingAppIds = new Set<number>()
 
-  for (const [keyword, appIds] of Object.entries(gameSearchMappings)) {
-    if (searchTerm.includes(keyword) || keyword.includes(searchTerm)) {
-      appIds.forEach(id => matchingAppIds.add(id))
-    }
-  }
-
-  // Generate fallback games based on matched IDs or popular games
-  const fallbackGameData = Array.from(matchingAppIds).slice(0, limit).map((appId, index) => {
-    const gameName = getGameNameById(appId) || `Game ${appId}`
-    return {
-      appid: appId,
-      steam_appid: appId,
-      name: gameName,
-      short_description: `${gameName} - Popular game matching your search for "${query}".`,
-      header_image: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
-      screenshots: [
-        {
-          id: 0,
-          path_thumbnail: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/ss_1.jpg`,
-          path_full: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/ss_1_1920x1080.jpg`
-        }
-      ],
-      price_overview: index % 3 === 0 ? undefined : {
-        currency: "USD",
-        initial: 5999,
-        final: 2999,
-        discount_percent: 50,
-        initial_formatted: "$59.99",
-        final_formatted: "$29.99"
-      },
-      is_free: index % 4 === 0,
-      genres: [
-        { id: "1", description: "Action" },
-        { id: "3", description: "RPG" }
-      ],
-      categories: [
-        { id: 1, description: "Single-player" },
-        { id: 2, description: "Multi-player" }
-      ],
-      release_date: {
-        coming_soon: false,
-        date: "2023-01-01"
-      },
-      metacritic: {
-        score: 75 + (index % 25),
-        url: `https://www.metacritic.com/game/pc/${gameName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`
-      },
-      recommendations: {
-        total: 50000 + (index * 10000)
-      },
-      developers: ["Game Developer"],
-      publishers: ["Game Publisher"]
-    }
-  })
-
-  // If no specific matches, return popular games
-  if (fallbackGameData.length === 0) {
-    return getFallbackPopularGames(limit)
-  }
-
-  return fallbackGameData
-}
-
-// Get game name by Steam App ID
-function getGameNameById(appId: number): string {
-  const gameNames: { [key: number]: string } = {
-    489830: "The Elder Scrolls V: Skyrim Special Edition",
-    72850: "The Elder Scrolls V: Skyrim",
-    306130: "The Elder Scrolls Online",
-    292030: "The Witcher 3: Wild Hunt",
-    20920: "The Witcher 2: Assassins of Kings Enhanced Edition",
-    1207664: "The Witcher: Enhanced Edition",
-    1091500: "Cyberpunk 2077",
-    271590: "Grand Theft Auto V",
-    12220: "Grand Theft Auto IV",
-    730: "Counter-Strike 2",
-    570: "Dota 2",
-    578080: "PUBG: BATTLEGROUNDS",
-    252490: "Rust",
-    377160: "Fallout 4",
-    22370: "Fallout: New Vegas",
-    22300: "Fallout 3",
-    379720: "DOOM",
-    2280: "Ultimate Doom",
-    546560: "Half-Life: Alyx",
-    220: "Half-Life 2",
-    380: "Half-Life",
-    620: "Portal 2",
-    400: "Portal",
-    8870: "BioShock Infinite",
-    409710: "BioShock: The Collection",
-    7670: "BioShock",
-    1328670: "Mass Effect: Legendary Edition",
-    17460: "Mass Effect",
-    812140: "Assassin's Creed Odyssey",
-    48190: "Assassin's Creed: Brotherhood",
-    1938090: "Call of Duty",
-    10190: "Call of Duty: Modern Warfare 2",
-    1517290: "Battlefield 2042",
-    24960: "Battlefield: Bad Company 2"
-  }
-
-  return gameNames[appId] || `Game ${appId}`
-}
 
 // Get game reviews with fallback for access denied errors
 export async function getGameReviews(
@@ -845,7 +954,7 @@ export async function getGameReviews(
       day_range: "9223372036854775807",
       review_type: reviewType,
       purchase_type: purchaseType,
-      num_per_page: "20",
+      num_per_page: "100",
     })
 
     const url = `https://store.steampowered.com/appreviews/${appId}?${params}`
@@ -866,12 +975,8 @@ export async function getGameReviews(
     clearTimeout(timeoutId)
 
     if (!response.ok) {
-      const errorText = await response.text()
-      console.warn(`Steam reviews API returned ${response.status}: ${errorText}`)
-
       // Only use fallback for specific errors that are unlikely to resolve
       if (response.status === 403 || response.status === 404) {
-        console.warn(`Using fallback data for app ${appId} due to ${response.status} error`)
         return getFallbackReviewData(appId)
       }
 
@@ -883,7 +988,6 @@ export async function getGameReviews(
 
     // Check if Steam API returned an error in the JSON
     if (data.success === false) {
-      console.warn(`Steam reviews API returned error: ${data.error} for appId ${appId}`)
       // Return empty result instead of fallback to allow trying other games
       return { reviews: [], cursor: "", query_summary: { num_reviews: 0, review_score: 0, review_score_desc: "", total_positive: 0, total_negative: 0, total_reviews: 0 } }
     }
@@ -927,8 +1031,7 @@ export async function getGameReviews(
 
     setCachedData(cacheKey, result)
     return result
-  } catch (error) {
-    console.error(`Error fetching reviews for ${appId}:`, error)
+  } catch {
     // Return empty result instead of fallback to allow trying other games
     return { reviews: [], cursor: "", query_summary: { num_reviews: 0, review_score: 0, review_score_desc: "", total_positive: 0, total_negative: 0, total_reviews: 0 } }
   }
@@ -1175,7 +1278,7 @@ function getGameSpecificFallbackData(appId: number) {
   return gameData[appId.toString()] || gameData.default
 }
 
-// Get games by genre/category
+// Get games by genre/category (enhanced version)
 export async function getGamesByGenre(genreId: string, limit = 20): Promise<SteamGame[]> {
   const cacheKey = `genre-${genreId}-${limit}`
   const cached = getCachedData<SteamGame[]>(cacheKey)
@@ -1195,238 +1298,274 @@ export async function getGamesByGenre(genreId: string, limit = 20): Promise<Stea
     setCachedData(cacheKey, filteredGames)
     return filteredGames
   } catch (error) {
-    console.error(`Error fetching games by genre ${genreId}:`, error)
     throw error
   }
 }
 
-// Get new releases and trending games
+// Get trending games using Steam's real-time data from featured categories
+
 export async function getTrendingGames(limit = 20): Promise<SteamGame[]> {
   const cacheKey = `trending-games-${limit}`
   const cached = getCachedData<SteamGame[]>(cacheKey)
-  if (cached) return cached
+  if (cached) {
+    return cached
+  }
 
   try {
-    console.log(`Fetching trending games with limit: ${limit}`)
 
-    // Start with recent popular games
-    const trendingGames: SteamGame[] = []
-
-    // Supplement with recent popular games
-    if (trendingGames.length < limit) {
-      console.log(`Supplementing with recent popular games...`)
-
-      const popularGames = await getPopularGames(100)
-      const currentDate = new Date()
-      const sixMonthsAgo = new Date(currentDate.getTime() - (6 * 30 * 24 * 60 * 60 * 1000))
-
-      const recentPopular = popularGames
-        .filter((game: SteamGame) => {
-          if (!game.release_date?.date || game.release_date.coming_soon) return false
-          if (trendingGames.find(tg => tg.appid === game.appid)) return false // Skip duplicates
-
-          try {
-            const releaseDate = new Date(game.release_date.date)
-            if (isNaN(releaseDate.getTime()) || releaseDate > currentDate) return false
-            return releaseDate >= sixMonthsAgo // Include games from last 6 months
-          } catch {
-            return false
-          }
-        })
-        .sort((a, b) => {
-          // Sort by recommendation count (popularity proxy) and then by release date
-          const aRecs = a.recommendations?.total || 0
-          const bRecs = b.recommendations?.total || 0
-          if (aRecs !== bRecs) return bRecs - aRecs
-
-          const aDate = new Date(a.release_date?.date || 0).getTime()
-          const bDate = new Date(b.release_date?.date || 0).getTime()
-          return bDate - aDate
-        })
-        .slice(0, limit - trendingGames.length)
-
-      trendingGames.push(...recentPopular)
-      console.log(`Added ${recentPopular.length} recent popular games to trending`)
-    }
-
-    // Sort final list by a combination of recency and popularity
-    trendingGames.sort((a, b) => {
-      const aRecs = a.recommendations?.total || 0
-      const bRecs = b.recommendations?.total || 0
-
-      // Weight recent games more heavily
-      const currentDate = new Date()
-      const aDate = new Date(a.release_date?.date || 0)
-      const bDate = new Date(b.release_date?.date || 0)
-
-      const aDaysSinceRelease = Math.max(0, (currentDate.getTime() - aDate.getTime()) / (1000 * 60 * 60 * 24))
-      const bDaysSinceRelease = Math.max(0, (currentDate.getTime() - bDate.getTime()) / (1000 * 60 * 60 * 24))
-
-      // Score = popularity / (days since release + 1) - gives higher score to popular recent games
-      const aScore = aRecs / (aDaysSinceRelease + 1)
-      const bScore = bRecs / (bDaysSinceRelease + 1)
-
-      return bScore - aScore
+    // Use Steam's featured categories API to get specials (trending/discounted games)
+    const featuredResponse = await fetch('https://store.steampowered.com/api/featuredcategories/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      }
     })
 
-    const finalTrending = trendingGames.slice(0, limit)
-    console.log(`Successfully processed ${finalTrending.length} trending games`)
-    setCachedData(cacheKey, finalTrending)
-    return finalTrending
-  } catch (error) {
-    console.error("Error fetching trending games:", error)
-    return getFallbackPopularGames(limit)
+    if (!featuredResponse.ok) {
+      throw new Error(`Steam featured API failed: ${featuredResponse.status}`)
+    }
+
+    const featuredData = await featuredResponse.json()
+
+    // Combine specials (trending due to sales) with some top sellers for variety
+    const specials = featuredData.specials?.items || []
+    const topSellers = featuredData.top_sellers?.items || []
+
+    // Mix specials (trending) with some top sellers, prioritizing specials
+    const trendingItems = [
+      ...specials.slice(0, Math.ceil(limit * 0.7)), // 70% specials (trending due to discounts)
+      ...topSellers.slice(0, Math.ceil(limit * 0.3))  // 30% top sellers
+    ]
+
+    if (trendingItems.length === 0) {
+      throw new Error('No trending games found in Steam API response')
+    }
+
+    // Remove duplicates and limit
+    const uniqueItems = trendingItems.filter((item, index, arr) =>
+      arr.findIndex(i => i.id === item.id) === index
+    ).slice(0, Math.min(limit * 1.5, 30)) // Reduced candidates
+
+    // Get detailed info for each game sequentially
+    const games: SteamGame[] = []
+
+    for (let i = 0; i < uniqueItems.length && games.length < limit; i++) {
+      const item = uniqueItems[i]
+
+      try {
+        const gameData = await getGameDetailsDirectAPI(item.id)
+        if (gameData) {
+          games.push(gameData)
+        }
+      } catch {
+      }
+    }
+
+    if (games.length === 0) {
+      return await getPopularGames(limit)
+    }
+
+    setCachedData(cacheKey, games)
+    return games
+  } catch {
+    return await getPopularGames(limit)
   }
 }
 
-// Get top-rated games
+
+
+// Get top-rated games by combining popular games and sorting by rating metrics
 export async function getTopRatedGames(limit = 20): Promise<SteamGame[]> {
-  const cacheKey = `top-rated-${limit}`
+  const cacheKey = `top-rated-games-${limit}`
   const cached = getCachedData<SteamGame[]>(cacheKey)
   if (cached) return cached
 
   try {
-    console.log(`Fetching top-rated games with limit: ${limit}`)
+    // Get a larger pool of popular games to find the highest rated ones
+    const popularGames = await getPopularGames(50)
+    const trendingGames = await getTrendingGames(30)
 
-    const popularGames = await getPopularGames(100)
-    console.log(`Got ${popularGames.length} popular games for top-rated analysis`)
+    // Combine and deduplicate games
+    const allGames = [...popularGames, ...trendingGames]
+    const uniqueGames = allGames.filter((game, index, arr) =>
+      arr.findIndex(g => g.appid === game.appid) === index
+    )
 
-    const topRated = popularGames
-      .filter((game: SteamGame) => game.metacritic?.score && game.metacritic.score > 0)
-      .sort((a, b) => (b.metacritic?.score || 0) - (a.metacritic?.score || 0))
+    // Calculate rating scores and sort by quality metrics
+    const gamesWithScores = uniqueGames.map(game => ({
+      game,
+      ratingScore: calculateGameRatingScore(game)
+    }))
+      .filter(item => item.ratingScore > 0) // Only include games with rating data
+      .sort((a, b) => b.ratingScore - a.ratingScore) // Sort by highest rating first
+
+    const topRatedGames = gamesWithScores
       .slice(0, limit)
+      .map(item => item.game)
 
-    console.log(`Found ${topRated.length} games with Metacritic scores`)
-
-    // If we don't have enough top-rated games, pad with popular games
-    if (topRated.length < limit) {
-      const additionalGames = popularGames
-        .filter(game => !topRated.find(t => t.appid === game.appid))
-        .sort((a, b) => (b.recommendations?.total || 0) - (a.recommendations?.total || 0))
-        .slice(0, limit - topRated.length)
-      topRated.push(...additionalGames)
-      console.log(`Added ${additionalGames.length} additional games based on recommendations`)
+    if (topRatedGames.length === 0) {
+      return await getPopularGames(limit)
     }
 
-    console.log(`Successfully processed ${topRated.length} top-rated games`)
-    setCachedData(cacheKey, topRated)
-    return topRated
-  } catch (error) {
-    console.error("Error fetching top-rated games:", error)
-    return getFallbackPopularGames(limit)
+    setCachedData(cacheKey, topRatedGames)
+    return topRatedGames
+  } catch {
+    return await getTopRatedGamesFallback(limit)
   }
 }
 
-// Get new releases (games released in the last 3 months)
+// Calculate a comprehensive rating score for a game
+function calculateGameRatingScore(game: SteamGame): number {
+  let score = 0
+
+  // Primary score from Metacritic (most reliable rating)
+  if (game.metacritic?.score) {
+    score += game.metacritic.score * 10 // Weight Metacritic heavily
+  }
+
+  // Secondary score from player engagement (recommendations)
+  if (game.recommendations?.total) {
+    // Use log scale to prevent games with millions of reviews from dominating
+    score += Math.log10(game.recommendations.total + 1) * 20
+  }
+
+  // Bonus for exceptional Metacritic scores
+  if (game.metacritic?.score && game.metacritic.score >= 90) {
+    score *= 1.3 // 30% bonus for exceptional games
+  } else if (game.metacritic?.score && game.metacritic.score >= 80) {
+    score *= 1.1 // 10% bonus for very good games
+  }
+
+  // Bonus for highly recommended games
+  if (game.recommendations?.total && game.recommendations.total >= 100000) {
+    score *= 1.15 // 15% bonus for very popular games
+  }
+
+  // Slight penalty for games without Metacritic scores
+  if (!game.metacritic?.score) {
+    score *= 0.8 // Reduce score by 20% if no professional rating
+  }
+
+  return score
+}
+
+// Fallback function for top-rated games when Steam API fails
+async function getTopRatedGamesFallback(limit: number): Promise<SteamGame[]> {
+  const topRatedGameIds = [
+    292030,   // The Witcher 3: Wild Hunt
+    1086940,  // Baldur's Gate 3
+    1245620,  // ELDEN RING
+    489830,   // The Elder Scrolls V: Skyrim Special Edition
+    620,      // Portal 2
+    546560,   // Half-Life: Alyx
+    220,      // Half-Life 2
+    1174180,  // Red Dead Redemption 2
+    582010,   // Monster Hunter: World
+    377160,   // Fallout 4
+  ]
+
+  const games: SteamGame[] = []
+  const idsToFetch = topRatedGameIds.slice(0, limit)
+
+  for (const appId of idsToFetch) {
+    try {
+      const gameData = await getGameDetailsDirectAPI(appId)
+      if (gameData) games.push(gameData)
+    } catch {
+    }
+  }
+
+  return games
+}
+
 export async function getNewReleases(limit = 20): Promise<SteamGame[]> {
-  const cacheKey = `new-releases-${limit}`
+  const cacheKey = `new-releases-games-${limit}`
   const cached = getCachedData<SteamGame[]>(cacheKey)
   if (cached) return cached
 
   try {
-    console.log(`Fetching new releases with limit: ${limit}`)
+    // Use Steam's featured categories API to get new releases
+    const featuredResponse = await fetch('https://store.steampowered.com/api/featuredcategories/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      }
+    })
 
-    const currentDate = new Date()
-    const newReleases: SteamGame[] = []
-
-    // Strategy: Get popular games and filter for newer ones (higher appids = more recent)
-    const popularGames = await getPopularGames(200) // Get a larger pool
-
-    // Filter for games that look like recent releases
-    const recentGames = popularGames
-      .filter((game: SteamGame) => {
-        // Skip coming soon games
-        if (game.release_date?.coming_soon) return false
-
-        // Skip non-full releases
-        const name = game.name.toLowerCase()
-        if (name.includes('demo') || name.includes('playtest') || name.includes('beta') ||
-          name.includes('supporter pack') || name.includes('soundtrack') ||
-          name.includes('artbook') || name.includes('wallpaper') ||
-          name.includes('animation pack') || name.includes('dlc') ||
-          name.includes('expansion') || name.includes('map pack')) {
-          return false
-        }
-
-        // Check release date if available - must be in the past
-        if (game.release_date?.date) {
-          try {
-            const releaseDate = new Date(game.release_date.date)
-            if (isNaN(releaseDate.getTime()) || releaseDate > currentDate) {
-              return false
-            }
-          } catch {
-            // If date parsing fails, still consider it (might be a recent game)
-          }
-        }
-
-        // Include games with higher appids (tend to be more recent)
-        return game.appid > 2000000 // Roughly games from 2022 onwards
-      })
-      .sort((a, b) => {
-        // Primary sort: appid (higher = newer)
-        const appIdDiff = (b.appid || 0) - (a.appid || 0)
-        if (appIdDiff !== 0) return appIdDiff
-
-        // Secondary sort: release date if available
-        if (a.release_date?.date && b.release_date?.date) {
-          const aDate = new Date(a.release_date.date).getTime()
-          const bDate = new Date(b.release_date.date).getTime()
-          return bDate - aDate
-        }
-
-        // Tertiary sort: recommendations
-        return (b.recommendations?.total || 0) - (a.recommendations?.total || 0)
-      })
-      .slice(0, limit)
-
-    newReleases.push(...recentGames)
-    console.log(`Found ${newReleases.length} recent games based on appid filtering`)
-
-    // If we still don't have enough, add some older but still relatively recent games
-    if (newReleases.length < limit) {
-      const additionalGames = popularGames
-        .filter((game: SteamGame) => {
-          // Skip already included games
-          if (newReleases.find(nr => nr.appid === game.appid)) return false
-
-          // Skip coming soon games
-          if (game.release_date?.coming_soon) return false
-
-          // Skip non-full releases
-          const name = game.name.toLowerCase()
-          if (name.includes('demo') || name.includes('playtest') || name.includes('beta') ||
-            name.includes('supporter pack') || name.includes('soundtrack') ||
-            name.includes('artbook') || name.includes('wallpaper') ||
-            name.includes('animation pack') || name.includes('dlc') ||
-            name.includes('expansion') || name.includes('map pack')) {
-            return false
-          }
-
-          // Include games from 2020 onwards
-          return game.appid > 1000000
-        })
-        .sort((a, b) => {
-          // Sort by appid (higher = newer)
-          const appIdDiff = (b.appid || 0) - (a.appid || 0)
-          if (appIdDiff !== 0) return appIdDiff
-
-          // Then by recommendations
-          return (b.recommendations?.total || 0) - (a.recommendations?.total || 0)
-        })
-        .slice(0, limit - newReleases.length)
-
-      newReleases.push(...additionalGames)
-      console.log(`Added ${additionalGames.length} additional recent games`)
+    if (!featuredResponse.ok) {
+      throw new Error(`Steam featured API failed: ${featuredResponse.status}`)
     }
 
-    console.log(`Successfully processed ${newReleases.length} new releases`)
-    setCachedData(cacheKey, newReleases.slice(0, limit))
-    return newReleases.slice(0, limit)
+    const featuredData = await featuredResponse.json()
+
+    // Get new releases from Steam's API
+    const newReleases = featuredData.new_releases?.items || []
+
+    if (newReleases.length === 0) {
+      throw new Error('No new releases found in Steam API response')
+    }
+
+    // Get detailed info for each game sequentially
+    const games: SteamGame[] = []
+    const itemsToProcess = newReleases.slice(0, Math.min(limit * 1.5, 30)) // Reduced candidates
+
+    for (let i = 0; i < itemsToProcess.length && games.length < limit; i++) {
+      const item = itemsToProcess[i]
+
+      try {
+        const gameData = await getGameDetailsDirectAPI(item.id)
+        if (gameData) {
+          games.push(gameData)
+        }
+      } catch {
+      }
+    }
+
+    if (games.length === 0) {
+      console.warn("🚨 NEW RELEASES: Failed to fetch any new release details, falling back to popular games")
+      return await getPopularGames(limit)
+    }
+
+    // Sort by app ID (higher IDs are generally newer)
+    games.sort((a, b) => (b.appid || 0) - (a.appid || 0))
+
+    setCachedData(cacheKey, games.slice(0, limit))
+    return games.slice(0, limit)
+
   } catch (error) {
-    console.error("Error fetching new releases:", error)
-    return getFallbackPopularGames(limit)
+    console.error("🚨 NEW RELEASES: Error fetching new releases from Steam API:", error)
+    return await getNewReleasesFallback(limit)
   }
+}
+
+// Fallback function for new releases when Steam API fails
+async function getNewReleasesFallback(limit: number): Promise<SteamGame[]> {
+  const recentReleaseIds = [
+    2358720,  // Black Myth: Wukong (2024)
+    2050650,  // Hogwarts Legacy (2023)
+    1623730,  // Palworld (2024)
+    1938090,  // Call of Duty (2023)
+    1794680,  // Vampire Survivors (2022)
+    1818750,  // Stray (2022)
+    1593500,  // God of War (2022)
+    1817070,  // Marvel's Spider-Man Remastered (2022)
+    1659040,  // Dave the Diver (2023)
+    1928980,  // Pizza Tower (2023)
+  ]
+
+  const games: SteamGame[] = []
+  const idsToFetch = recentReleaseIds.slice(0, limit)
+
+  for (const appId of idsToFetch) {
+    try {
+      const gameData = await getGameDetailsDirectAPI(appId)
+      if (gameData) games.push(gameData)
+    } catch (error) {
+      console.error(`Failed to fetch fallback new release ${appId}:`, error)
+    }
+  }
+
+  return games
 }
 
 // Get related games based on similarity to a given game
@@ -1436,7 +1575,6 @@ export async function getRelatedGames(gameId: number, limit = 8): Promise<SteamG
   if (cached) return cached
 
   try {
-    console.log(`Finding related games for game ID: ${gameId}`)
 
     // First, get the details of the current game
     const currentGame = await getGameDetails(gameId)
@@ -1460,7 +1598,6 @@ export async function getRelatedGames(gameId: number, limit = 8): Promise<SteamG
       .slice(0, limit)
 
     const relatedGames = gameScores.map(item => item.game)
-    console.log(`Found ${relatedGames.length} related games for ${currentGame.name}`)
     setCachedData(cacheKey, relatedGames)
     return relatedGames
   } catch (error) {
@@ -1531,21 +1668,167 @@ function calculateSimilarityScore(game1: SteamGame, game2: SteamGame): number {
 
   return score
 }
+// Get all hardware/tools from Steam (for fallback purposes)
+export async function getSteamHardwareAndTools(): Promise<{ appid: number; name: string; type: string }[]> {
+  const cacheKey = 'steam-hardware-tools'
+  const cached = getCachedData<{ appid: number; name: string; type: string }[]>(cacheKey)
+  if (cached) return cached
+
+  try {
+    // Get the full app list from Steam
+    const response = await fetch('https://api.steampowered.com/ISteamApps/GetAppList/v2/', { cache: 'no-store' })
+    const appListData = await response.json() as SteamAppList
+
+    if (!appListData?.applist?.apps) {
+      throw new Error('Failed to fetch Steam app list')
+    }
+
+    const hardwareAndTools: { appid: number; name: string; type: string }[] = []
+
+    // Sample a subset of apps to check their types (checking all would be too slow)
+    // Focus on apps that might be hardware/tools based on name patterns
+    const potentialHardwareApps = appListData.applist.apps.filter(app =>
+      app.name.toLowerCase().includes('deck') ||
+      app.name.toLowerCase().includes('controller') ||
+      app.name.toLowerCase().includes('keyboard') ||
+      app.name.toLowerCase().includes('mouse') ||
+      app.name.toLowerCase().includes('headset') ||
+      app.name.toLowerCase().includes('hardware') ||
+      app.name.toLowerCase().includes('steam') && (
+        app.name.toLowerCase().includes('link') ||
+        app.name.toLowerCase().includes('vr') ||
+        app.name.toLowerCase().includes('controller')
+      )
+    )
+
+    // Check the actual type for these potential hardware apps
+    for (const app of potentialHardwareApps.slice(0, 50)) { // Limit to avoid too many API calls
+      try {
+        await new Promise(resolve => setTimeout(resolve, 100)) // Rate limiting
+        const detailsResponse = await fetch(`https://store.steampowered.com/api/appdetails?appids=${app.appid}&cc=us&l=english`)
+        const detailsData = await detailsResponse.json()
+
+        const appData = detailsData[app.appid]
+        if (appData?.success && appData.data?.type && appData.data.type !== 'game') {
+          hardwareAndTools.push({
+            appid: app.appid,
+            name: appData.data.name || app.name,
+            type: appData.data.type
+          })
+        }
+      } catch (error) {
+        console.warn(`Failed to check type for app ${app.appid}:`, error)
+      }
+    }
+
+    // Also include known hardware/tools that might not be caught by name patterns
+    const knownHardwareIds = [1675200, 223300] // Steam Deck, Steam Hardware
+    for (const appid of knownHardwareIds) {
+      if (!hardwareAndTools.find(h => h.appid === appid)) {
+        try {
+          const detailsResponse = await fetch(`https://store.steampowered.com/api/appdetails?appids=${appid}&cc=us&l=english`)
+          const detailsData = await detailsResponse.json()
+
+          const appData = detailsData[appid]
+          if (appData?.success && appData.data) {
+            hardwareAndTools.push({
+              appid: appid,
+              name: appData.data.name,
+              type: appData.data.type || 'hardware'
+            })
+          }
+        } catch (error) {
+          console.warn(`Failed to fetch known hardware ${appid}:`, error)
+        }
+      }
+    }
+
+    setCachedData(cacheKey, hardwareAndTools)
+    return hardwareAndTools
+  } catch (error) {
+    console.error('Error fetching Steam hardware/tools:', error)
+    // Return known hardware/tools as fallback
+    return [
+      { appid: 1675200, name: 'Steam Deck', type: 'hardware' },
+      { appid: 223300, name: 'Steam Hardware', type: 'hardware' }
+    ]
+  }
+}
+// Get user's owned games using Steam Web API (requires API key)
+export async function getOwnedGames(steamId: string, includePlayedFreeGames = true): Promise<{ game_count: number; games: Array<{ appid: number; name: string; playtime_forever: number; playtime_2weeks?: number }> } | null> {
+  if (!steamApiKey) {
+    console.warn("Steam API key not available for getOwnedGames")
+    return null
+  }
+
+  const cacheKey = `owned-games-${steamId}-${includePlayedFreeGames}`
+  const cached = getCachedData<{ game_count: number; games: Array<{ appid: number; name: string; playtime_forever: number; playtime_2weeks?: number }> }>(cacheKey)
+  if (cached) return cached
+
+  try {
+    return await steamCircuitBreaker.execute(() =>
+      steamRateLimiter.addRequest(async () => {
+        const response = await fetch(
+          `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=true&include_played_free_games=${includePlayedFreeGames}&format=json`,
+          {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+          }
+        )
+
+        if (!response.ok) {
+          if (response.status === 403) {
+            console.warn("Access denied to owned games - profile may be private")
+            return null
+          }
+          throw new Error(`Steam API error: ${response.status}`)
+        }
+
+        const data = await response.json()
+        const result = data.response
+
+        if (!result || !result.games) {
+          return null
+        }
+
+        // Sort by playtime (most played first)
+        result.games.sort((a: { playtime_forever: number }, b: { playtime_forever: number }) => b.playtime_forever - a.playtime_forever)
+
+        setCachedData(cacheKey, result)
+        apiMonitor.logRequest(true, false)
+        return result
+      })
+    )
+  } catch (error) {
+    console.error("Error fetching owned games:", error)
+    apiMonitor.logRequest(false, false, 'error')
+    return null
+  }
+}
 export function formatGameForDisplay(game: SteamGame) {
   // Ensure we have a valid game ID
   if (!game.appid && game.steam_appid) {
     // Map steam_appid to appid for consistency
-    console.log(`Mapping steam_appid ${game.steam_appid} to appid for: ${game.name}`)
     game.appid = game.steam_appid
   } else if (!game.appid) {
     console.warn('Game missing both appid and steam_appid:', game.name || 'Unknown game')
   }
 
+  // Determine if this is hardware/tool or game
+  const isHardwareOrTool = game.type && (game.type === 'hardware' || game.type === 'tool' || game.type === 'application')
+
   return {
     id: game.appid || 0, // Fallback to 0 if appid is missing
     name: game.name || "Unknown Game",
+    type: game.type || "game", // Include the app type
     image: game.header_image || "/placeholder.svg",
     rating: (() => {
+      // Hardware/tools typically don't have ratings, so return 0 or a default
+      if (isHardwareOrTool) {
+        return 0 // No rating for hardware/tools
+      }
+
       // Use Metacritic score if available
       if (game.metacritic?.score && game.metacritic.score > 0) {
         return game.metacritic.score / 20 // Convert to 5-star scale
@@ -1588,10 +1871,99 @@ export function formatGameForDisplay(game: SteamGame) {
     })(),
     tags: game.genres?.map((g) => g.description) || [],
     releaseDate: game.release_date?.date || "",
-    description: game.short_description || "No description available",
+    description: (() => {
+      // For hardware/tools, provide fallback descriptions if the API doesn't have one
+      if (isHardwareOrTool && (!game.short_description || game.short_description.trim() === '')) {
+        // Try to generate a description based on the app name and type
+        const name = game.name.toLowerCase()
+
+        // Check for known hardware patterns
+        if (name.includes('steam deck')) {
+          return "The Steam Deck is a portable gaming PC developed by Valve. It features a custom AMD APU, 7-inch touchscreen, and full access to your Steam library."
+        }
+        if (name.includes('controller') || name.includes('gamepad')) {
+          return "A gaming controller designed for enhanced gameplay experience on Steam."
+        }
+        if (name.includes('keyboard') || name.includes('mouse')) {
+          return "Gaming peripheral designed for precision and comfort during long gaming sessions."
+        }
+        if (name.includes('headset') || name.includes('headphones')) {
+          return "Gaming audio device providing immersive sound and clear communication."
+        }
+
+        // Generic fallback based on type
+        if (game.type === 'hardware') {
+          return `${game.name} is gaming hardware available on Steam, designed to enhance your gaming experience.`
+        }
+        if (game.type === 'tool') {
+          return `${game.name} is a development tool or utility available on Steam.`
+        }
+        if (game.type === 'application') {
+          return `${game.name} is an application available on Steam.`
+        }
+
+        return `${game.name} is a ${game.type || 'product'} available on Steam.`
+      }
+
+      return game.short_description || "No description available"
+    })(),
     screenshots: game.screenshots || [],
     movies: game.movies || [],
-    developers: game.developers || [],
-    publishers: game.publishers || [],
+    developers: (() => {
+      // For hardware/tools, provide fallback developers if missing
+      if (isHardwareOrTool && (!game.developers || game.developers.length === 0)) {
+        const name = game.name.toLowerCase()
+
+        // Check for known brands/developers
+        if (name.includes('steam') || name.includes('valve')) {
+          return ["Valve"]
+        }
+        if (name.includes('razer')) {
+          return ["Razer"]
+        }
+        if (name.includes('logitech')) {
+          return ["Logitech"]
+        }
+        if (name.includes('corsair')) {
+          return ["Corsair"]
+        }
+        if (name.includes('steelseries')) {
+          return ["SteelSeries"]
+        }
+
+        // For unknown hardware, try to infer from name or use generic
+        return ["Hardware Manufacturer"]
+      }
+
+      return game.developers || []
+    })(),
+    publishers: (() => {
+      // For hardware/tools, provide fallback publishers if missing
+      if (isHardwareOrTool && (!game.publishers || game.publishers.length === 0)) {
+        const name = game.name.toLowerCase()
+
+        // Check for known brands/publishers
+        if (name.includes('steam') || name.includes('valve')) {
+          return ["Valve"]
+        }
+        if (name.includes('razer')) {
+          return ["Razer"]
+        }
+        if (name.includes('logitech')) {
+          return ["Logitech"]
+        }
+        if (name.includes('corsair')) {
+          return ["Corsair"]
+        }
+        if (name.includes('steelseries')) {
+          return ["SteelSeries"]
+        }
+
+        // For unknown hardware, try to infer from name or use generic
+        return ["Hardware Manufacturer"]
+      }
+
+      return game.publishers || []
+    })(),
   }
 }

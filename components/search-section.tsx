@@ -3,6 +3,7 @@
 import type React from "react"
 
 import { AdvancedSearchFilters } from "@/components/advanced-search-filters"
+import { MotionEffect } from "@/components/animate-ui/effects/motion-effect"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -11,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useDebounce } from "@/hooks/use-debounce"
 import { useSearchGames } from "@/hooks/use-steam-games"
 import { Search, SlidersHorizontal, Star, Users } from "lucide-react"
+import Image from "next/image"
 import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
 
@@ -111,40 +113,59 @@ export function SearchSection({ initialQuery = "" }: SearchSectionProps) {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-4xl">
           {/* Search Header */}
-          <div className="text-center mb-8">
-            <h2 className="text-3xl font-bold text-foreground mb-4">Find Your Perfect Game</h2>
-            <p className="text-muted-foreground text-lg">
-              Search through thousands of Steam games and discover hidden gems
-            </p>
-          </div>
+          <MotionEffect
+            slide={{
+              direction: 'up',
+            }}
+            fade
+            zoom
+            inView
+          >
+            <div className="text-center mb-8">
+              <h2 className="text-3xl font-bold text-foreground mb-4">Find Your Perfect Game</h2>
+              <p className="text-muted-foreground text-lg">
+                Search through thousands of Steam games and discover hidden gems
+              </p>
+            </div>
+          </MotionEffect>
 
           {/* Search Bar */}
-          <div className="relative mb-8">
-            <div className="flex gap-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-                <Input
-                  placeholder="Search for games, genres, or developers..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  className="pl-12 h-12 text-base bg-background border-border/50 focus:border-primary/50"
-                />
+          <MotionEffect
+            slide={{
+              direction: 'up',
+            }}
+            fade
+            zoom
+            inView
+            delay={0.1}
+          >
+            <div className="relative mb-8">
+              <div className="flex gap-3">
+                <div className="relative flex-1">
+                  <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                  <Input
+                    placeholder="Search for games, genres, or developers..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    className="pl-12 h-12 text-base bg-background border-border/50 focus:border-primary/50"
+                  />
+                </div>
+                <Button size="lg" className="px-6" onClick={handleSearch}>
+                  <Search className="h-5 w-5 mr-2" />
+                  Search
+                </Button>
+                <Button
+                  size="lg"
+                  variant={showAdvancedFilters ? "default" : "outline"}
+                  className="px-4"
+                  onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                >
+                  <SlidersHorizontal className="h-5 w-5" />
+                </Button>
               </div>
-              <Button size="lg" className="px-6" onClick={handleSearch}>
-                <Search className="h-5 w-5 mr-2" />
-                Search
-              </Button>
-              <Button
-                size="lg"
-                variant={showAdvancedFilters ? "default" : "outline"}
-                className="px-4"
-                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-              >
-                <SlidersHorizontal className="h-5 w-5" />
-              </Button>
             </div>
-          </div>
+          </MotionEffect>
 
           {showAdvancedFilters && (
             <div className="mb-8">
@@ -190,7 +211,9 @@ export function SearchSection({ initialQuery = "" }: SearchSectionProps) {
                   <div className="mb-4">
                     <Search className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
                     <p className="text-destructive mb-2">Search temporarily unavailable</p>
-                    <p className="text-sm text-muted-foreground">{error}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {error instanceof Error ? error.message : String(error)}
+                    </p>
                   </div>
                   <Button variant="outline" onClick={() => window.location.reload()} size="sm">
                     Try Again
@@ -229,15 +252,12 @@ export function SearchSection({ initialQuery = "" }: SearchSectionProps) {
                     >
                       <div className="flex">
                         <div className="relative w-24 h-16 flex-shrink-0">
-                          <img
+                          <Image
                             src={game.image || "/placeholder.svg"}
                             alt={game.name}
+                            width={96}
+                            height={64}
                             className="w-full h-full object-cover"
-                            onError={(e) => {
-                              const target = e.target as HTMLImageElement
-                              target.src =
-                                "/placeholder.svg?height=64&width=96&text=" + encodeURIComponent(game.name.slice(0, 8))
-                            }}
                           />
                           {game.price && game.price.toLowerCase().includes('free') && (
                             <div className="absolute top-1 left-1">
@@ -252,7 +272,7 @@ export function SearchSection({ initialQuery = "" }: SearchSectionProps) {
                             {game.name}
                           </h4>
                           <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                            {game.rating > 0 && (
+                            {game.rating && game.rating > 0 && (
                               <div className="flex items-center gap-1">
                                 <Star className="h-3 w-3 text-yellow-500 fill-current" />
                                 <span>{game.rating.toFixed(1)}</span>
@@ -289,40 +309,60 @@ export function SearchSection({ initialQuery = "" }: SearchSectionProps) {
           )}
 
           {/* Popular Tags */}
-          <div className="mb-8">
-            <h3 className="text-sm font-medium text-muted-foreground mb-4 uppercase tracking-wide">
-              Popular Categories
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {popularTags.map((tag) => (
-                <Badge
-                  key={tag}
-                  variant={selectedTags.includes(tag) ? "default" : "secondary"}
-                  className={`cursor-pointer transition-all hover:scale-105 ${selectedTags.includes(tag) ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/80"
-                    }`}
-                  onClick={() => toggleTag(tag)}
-                >
-                  {tag}
-                </Badge>
-              ))}
+          <MotionEffect
+            slide={{
+              direction: 'up',
+            }}
+            fade
+            zoom
+            inView
+            delay={0.2}
+          >
+            <div className="mb-8">
+              <h3 className="text-sm font-medium text-muted-foreground mb-4 uppercase tracking-wide">
+                Popular Categories
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {popularTags.map((tag) => (
+                  <Badge
+                    key={tag}
+                    variant={selectedTags.includes(tag) ? "default" : "secondary"}
+                    className={`cursor-pointer transition-all hover:scale-105 ${selectedTags.includes(tag) ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/80"
+                      }`}
+                    onClick={() => toggleTag(tag)}
+                  >
+                    {tag}
+                  </Badge>
+                ))}
+              </div>
             </div>
-          </div>
+          </MotionEffect>
 
           {/* Quick Filters */}
-          <div className="flex flex-wrap gap-3 justify-center">
-            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-              🔥 Trending Now
-            </Button>
-            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-              ⭐ Highest Rated
-            </Button>
-            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-              🆕 New Releases
-            </Button>
-            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-              💰 Best Value
-            </Button>
-          </div>
+          <MotionEffect
+            slide={{
+              direction: 'up',
+            }}
+            fade
+            zoom
+            inView
+            delay={0.3}
+          >
+            <div className="flex flex-wrap gap-3 justify-center">
+              <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                🔥 Trending Now
+              </Button>
+              <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                ⭐ Highest Rated
+              </Button>
+              <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                🆕 New Releases
+              </Button>
+              <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
+                💰 Best Value
+              </Button>
+            </div>
+          </MotionEffect>
         </div>
       </div>
     </section>

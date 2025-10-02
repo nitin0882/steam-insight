@@ -25,8 +25,6 @@ export async function GET(request: NextRequest) {
         const gameId = searchParams.get("game_id")
         const includeMetadata = searchParams.get("metadata") === "true"
 
-        console.log(`Fetching review IDs with limit: ${limit}, gameId: ${gameId}`)
-
         const reviewMappings: ReviewIdMapping[] = []
 
         if (gameId) {

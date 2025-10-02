@@ -43,12 +43,22 @@ export default function Error({
                     {process.env.NODE_ENV === "development" && (
                         <div className="mb-8 p-4 bg-muted/50 rounded-lg text-left">
                             <p className="text-sm font-mono text-muted-foreground">
-                                <strong>Error:</strong> {error.message}
+                                <strong>Error:</strong> {error.message || "Unknown error"}
                             </p>
                             {error.digest && (
                                 <p className="text-sm font-mono text-muted-foreground mt-2">
                                     <strong>Digest:</strong> {error.digest}
                                 </p>
+                            )}
+                            {error.stack && (
+                                <details className="mt-2">
+                                    <summary className="text-sm font-mono text-muted-foreground cursor-pointer">
+                                        Stack Trace
+                                    </summary>
+                                    <pre className="text-xs font-mono text-muted-foreground mt-2 whitespace-pre-wrap overflow-auto max-h-40">
+                                        {error.stack}
+                                    </pre>
+                                </details>
                             )}
                         </div>
                     )}

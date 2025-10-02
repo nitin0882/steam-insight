@@ -1,6 +1,7 @@
+import { AppFooter } from "@/components/app-footer"
+import { AppHeader } from "@/components/app-header"
 import { FloatingSteamAwards } from "@/components/floating-steam-awards"
-import { Footer } from "@/components/footer"
-import { Header } from "@/components/header"
+import { MenuProvider } from "@/components/menu-context"
 import { PageTransition } from "@/components/page-transition"
 import { PerformanceMonitor } from "@/components/performance-monitor"
 import { Analytics } from "@vercel/analytics/next"
@@ -95,14 +96,21 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
       <body className={`font-sans ${inter.variable} antialiased`}>
-        <Header />
-        <PageTransition>
-          <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
-        </PageTransition>
-        <Footer />
-        <FloatingSteamAwards />
-        <PerformanceMonitor />
-        <Analytics />
+        <MenuProvider>
+          <div className="flex min-h-screen">
+
+            <div className="flex-1 flex flex-col">
+              <AppHeader />
+              <PageTransition>
+                <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
+              </PageTransition>
+              <AppFooter />
+            </div>
+          </div>
+          <FloatingSteamAwards />
+          <PerformanceMonitor />
+          <Analytics />
+        </MenuProvider>
       </body>
     </html>
   )
